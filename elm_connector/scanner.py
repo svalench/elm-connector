@@ -37,24 +37,31 @@ class DeviceInfo:
         return f"{self.path} — {self.name}{desc} [{self.device_type}]"
 
 
-def _scan_serial_ports() -> List[DeviceInfo]:
-    """Поиск serial-портов, похожих на ELM327 (Bluetooth SPP, USB)."""
+def _scan_serial_ports(strict: bool = True) -> List[DeviceInfo]:
+    """
+    Поиск serial-портов.
+    strict=True: только порты с OBD/ELM в имени (для точного совпадения)
+    strict=False: все порты, кроме заведомо служебных (fallback на Windows)
+    """
     devices: List[DeviceInfo] = []
     try:
         for port in serial.tools.list_ports.comports():
             name = (port.description or "").lower()
             hwid = (port.hwid or "").lower()
-            combined = f"{name} {hwid}".lower()
+            combined = f"{port.device} {name} {hwid}".lower()
 
             if any(ex in combined for ex in SERIAL_EXCLUDE):
                 continue
-            if any(kw in combined for kw in SERIAL_KEYWORDS):
-                devices.append(DeviceInfo(
-                    path=port.device,
-                    name=port.description or port.device,
-                    device_type="serial",
-                    description=port.hwid or "",
-                ))
+
+            if strict and not any(kw in combined for kw in SERIAL_KEYWORDS):
+                continue
+
+            devices.append(DeviceInfo(
+                path=port.device,
+                name=port.description or port.device,
+                device_type="serial",
+                description=port.hwid or "",
+            ))
     except Exception as e:
         logger.debug("Serial scan error: %s", e)
     return devices
@@ -157,11 +164,16 @@ def scan_devices() -> List[DeviceInfo]:
     """
     Сканирование всех доступных способов поиска ELM327.
     Возвращает объединённый список без дубликатов по path.
+    Если по ключевым словам ничего не найдено — показываем все serial-порты (fallback для Windows).
     """
     all_devices: List[DeviceInfo] = []
     seen_paths: set = set()
 
-    for scan_fn in [_scan_serial_ports, _scan_ble, _scan_macos_bluetooth_paired]:
+    for scan_fn in [
+        lambda: _scan_serial_ports(strict=True),
+        _scan_ble,
+        _scan_macos_bluetooth_paired,
+    ]:
         try:
             for dev in scan_fn():
                 if dev.path and dev.path not in seen_paths:
@@ -169,5 +181,19 @@ def scan_devices() -> List[DeviceInfo]:
                     all_devices.append(dev)
         except Exception as e:
             logger.debug("Scan function error: %s", e)
+
+    # Fallback: если строгий поиск ничего не дал — показываем ВСЕ serial-порты (Windows COM4, COM5 и т.д.)
+    if not all_devices:
+        try:
+            for dev in _scan_serial_ports(strict=False):
+                if dev.path and dev.path not in seen_paths:
+                    seen_paths.add(dev.path)
+                    all_devices.append(dev)
+            if all_devices:
+                logger.info(
+                    "No OBD-named ports found; listing all serial ports. Select your ELM327 (often COM4/COM5)."
+                )
+        except Exception as e:
+            logger.debug("Fallback serial scan error: %s", e)
 
     return all_devices
