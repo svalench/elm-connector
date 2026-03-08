@@ -3,7 +3,7 @@
 """
 
 import logging
-import re
+import time
 from typing import Optional
 
 import serial
@@ -55,8 +55,8 @@ class SerialConnection:
         self,
         port: str,
         baudrate: int = 38400,
-        timeout: float = 1.0,
-        write_timeout: float = 1.0,
+        timeout: float = 5.0,
+        write_timeout: float = 5.0,
     ):
         self.port = port
         self.baudrate = baudrate
@@ -75,6 +75,9 @@ class SerialConnection:
             timeout=self.timeout,
             write_timeout=self.write_timeout,
         )
+        self._serial.reset_input_buffer()
+        self._serial.reset_output_buffer()
+        time.sleep(0.5)  # дать адаптеру время инициализироваться (особенно Bluetooth)
         logger.info("Connected to %s", self.port)
 
     def close(self) -> None:

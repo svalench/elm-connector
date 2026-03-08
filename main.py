@@ -4,6 +4,7 @@ ELM327 Bluetooth Connector — точка входа.
 Поиск устройств, идентификация чипа, соединение с подробным RX/TX логированием.
 """
 
+import argparse
 import logging
 import sys
 from typing import Optional
@@ -118,62 +119,101 @@ def interactive_mode(elm: ELM327) -> None:
             print(f"Ошибка: {e}")
 
 
+def _format_connection_error(exc: Exception) -> str:
+    """Форматирование ошибки подключения с подсказками для Windows."""
+    msg = str(exc).lower()
+    err = str(exc)
+    if "semaphore" in msg or "121" in msg or "таймаут семафора" in msg:
+        return (
+            f"{err}\n\n"
+            "Подсказка: откройте Параметры → Bluetooth → ваш ELM327 и нажмите «Подключить».\n"
+            "Убедитесь, что другой софт не использует этот COM-порт."
+        )
+    if "write timeout" in msg or "serialtimeout" in msg:
+        return (
+            f"{err}\n\n"
+            "Подсказка: попробуйте другой COM-порт (COM4/COM5) или скорость: python main.py --port COM5 --baudrate 9600"
+        )
+    if "could not open" in msg or "access" in msg:
+        return f"{err}\n\nПодсказка: порт занят другим приложением или нет прав доступа."
+    return err
+
+
 def main() -> int:
     """Основная логика: сканирование → выбор → подключение → идентификация → интерактив."""
+    parser = argparse.ArgumentParser(
+        description="ELM327 Bluetooth Connector — поиск, идентификация, соединение с RX/TX логом"
+    )
+    parser.add_argument(
+        "--port",
+        type=str,
+        help="Порт напрямую (COM4, COM5, /dev/tty.OBDII-SPP и т.д.). Пропустить сканирование.",
+    )
+    parser.add_argument(
+        "--baudrate",
+        type=int,
+        default=38400,
+        choices=[9600, 38400, 115200],
+        help="Скорость порта (по умолчанию 38400; клоны ELM327 часто используют 9600)",
+    )
+    args = parser.parse_args()
+
     setup_logging()
     logger = logging.getLogger(__name__)
 
     print_banner()
 
-    # Этап 1: Сканирование
-    logger.info("Scanning for ELM327 devices...")
-    devices = scan_devices()
+    port_path: Optional[str] = None
+    if args.port:
+        port_path = args.port
+        logger.info("Using port from CLI: %s @ %d baud", port_path, args.baudrate)
+    else:
+        # Этап 1: Сканирование
+        logger.info("Scanning for ELM327 devices...")
+        devices = scan_devices()
 
-    if not devices:
-        logger.warning("No ELM327 devices found.")
-        logger.info("Ensure device is paired (macOS: System Settings → Bluetooth).")
-        logger.info("For serial: check /dev/tty.* after pairing.")
-        return 1
+        if not devices:
+            logger.warning("No ELM327 devices found.")
+            logger.info("Ensure device is paired. Windows: Settings → Bluetooth → Connect.")
+            logger.info("Or specify port manually: python main.py --port COM5 --baudrate 9600")
+            return 1
 
-    logger.info("Found %d device(s):", len(devices))
-    for dev in devices:
-        logger.info("  • %s", dev)
+        logger.info("Found %d device(s):", len(devices))
+        for dev in devices:
+            logger.info("  • %s", dev)
 
-    # Этап 2: Выбор устройства
-    device = select_device(devices)
-    if not device:
-        return 1
+        # Этап 2: Выбор устройства
+        device = select_device(devices)
+        if not device:
+            return 1
 
-    # Для BLE-устройств нужен другой путь подключения (ble-serial и т.п.)
-    # Сейчас поддерживаем только serial-порты
-    if device.device_type == "ble":
-        logger.warning(
-            "BLE devices require additional setup (e.g. ble-serial). "
-            "Use a serial port for direct connection."
-        )
-        return 1
-
-    if device.device_type == "paired":
-        # paired хранит имя, нужно найти реальный порт
-        port_candidates = [d for d in devices if d.device_type == "serial" and device.name.lower() in d.path.lower()]
-        if port_candidates:
-            device = port_candidates[0]
-        else:
+        if device.device_type == "ble":
             logger.warning(
-                "Paired device '%s' — pair first, then check /dev/tty.* for the serial port.",
-                device.name,
+                "BLE devices require additional setup (e.g. ble-serial). "
+                "Use a serial port for direct connection."
             )
             return 1
 
-    port_path = device.path
-    logger.info("Using device: %s", port_path)
+        if device.device_type == "paired":
+            port_candidates = [d for d in devices if d.device_type == "serial" and device.name.lower() in d.path.lower()]
+            if port_candidates:
+                device = port_candidates[0]
+            else:
+                logger.warning(
+                    "Paired device '%s' — pair first, then check /dev/tty.* for the serial port.",
+                    device.name,
+                )
+                return 1
+
+        port_path = device.path
+        logger.info("Using device: %s", port_path)
 
     # Этап 3: Подключение
     try:
-        conn = SerialConnection(port=port_path, baudrate=38400)
+        conn = SerialConnection(port=port_path, baudrate=args.baudrate)
         conn.open()
     except Exception as e:
-        logger.error("Failed to connect: %s", e)
+        logger.error("Failed to connect: %s", _format_connection_error(e))
         return 1
 
     try:
@@ -181,7 +221,18 @@ def main() -> int:
 
         # Этап 4: Идентификация чипа
         logger.info("Resetting adapter (ATZ)...")
-        reset_resp = elm.reset()
+        try:
+            reset_resp = elm.reset()
+        except Exception as e:
+            err_msg = str(e).lower()
+            if "timeout" in err_msg:
+                logger.error(
+                    "Write/timeout. Попробуйте: python main.py --port %s --baudrate 9600",
+                    port_path,
+                )
+            else:
+                logger.error("Ошибка: %s", e)
+            return 1
         if reset_resp:
             logger.info("Reset response: %s", reset_resp.split("\n")[0] if "\n" in reset_resp else reset_resp)
 
