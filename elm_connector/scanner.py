@@ -70,10 +70,6 @@ def _scan_ble() -> List[DeviceInfo]:
         async def discover():
             return await BleakScanner.discover(timeout=5.0)
 
-        if sys.platform == "darwin":
-            # macOS 12.0–12.2 может требовать service_uuids; пробуем без
-            pass
-
         found = asyncio.run(discover())
 
         for d in found:
@@ -83,12 +79,16 @@ def _scan_ble() -> List[DeviceInfo]:
                     path=d.address,
                     name=d.name or d.address,
                     device_type="ble",
-                    description=f"BLE device",
+                    description="BLE device",
                 ))
     except ImportError:
-        logger.debug("bleak not available, skipping BLE scan")
+        logger.debug("BLE scan skipped: bleak not installed")
     except Exception as e:
-        logger.debug("BLE scan error: %s", e)
+        err_msg = str(e).lower()
+        if "windows" in err_msg or "property is not available" in err_msg or "unsupported" in err_msg:
+            logger.debug("BLE scan skipped: not supported on this system (ELM327 often uses Bluetooth Classic)")
+        else:
+            logger.debug("BLE scan error: %s", e)
     return devices
 
 
